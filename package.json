@@ -1,13 +1,19 @@
 {
-  "name": "obj-file-api",
+  "name": "obj-file-api-sellauth",
   "version": "1.0.0",
-  "description": "API to serve OBJ files",
+  "description": "Sell Auth compatible API for OBJ file delivery",
   "main": "server.js",
   "scripts": {
-    "start": "node server.js"
+    "start": "node server.js",
+    "dev": "nodemon server.js"
   },
   "dependencies": {
     "express": "^4.18.2",
-    "axios": "^1.6.0"
+    "axios": "^1.6.0",
+    "cors": "^2.8.5",
+    "crypto": "^1.0.1"
+  },
+  "devDependencies": {
+    "nodemon": "^3.0.1"
   }
 }
