@@ -7,108 +7,125 @@ const PORT = process.env.PORT || 3000;
 
 // --- CONFIGURATION ---
 const SOURCE_FILE_URL = 'https://voidlureds.vercel.app/Radio-Telescope.obj';
-const SELLAUTH_SECRET = process.env.SELLAUTH_SECRET || 'your-sellauth-secret-key';
 
 // --- Middleware ---
 app.use(cors());
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 
-// --- Verify Sell Auth Signature ---
-function verifySignature(req) {
-    const signature = req.headers['x-signature'];
-    const timestamp = req.headers['x-timestamp'];
-    
-    if (!signature) {
-        console.log('[Sell Auth] ⚠️ No signature header found');
-        return false;
-    }
-
-    // Create HMAC-SHA256 signature
-    const payload = JSON.stringify(req.body);
-    const hmac = crypto.createHmac('sha256', SELLAUTH_SECRET);
-    hmac.update(payload);
-    const expectedSignature = hmac.digest('hex');
-
-    // Compare signatures (constant time comparison for security)
-    return crypto.timingSafeEqual(
-        Buffer.from(signature, 'hex'),
-        Buffer.from(expectedSignature, 'hex')
-    );
-}
-
-// --- Sell Auth Dynamic Delivery Webhook ---
+// --- Sell Auth Webhook Handler ---
 app.post('/api/file', async (req, res) => {
-    console.log('\n========================================');
-    console.log('[Sell Auth] 📨 Webhook received at:', new Date().toISOString());
-    console.log('[Sell Auth] Event:', req.body.event);
-    console.log('[Sell Auth] Status:', req.body.status);
-    console.log('[Sell Auth] Email:', req.body.email);
-    console.log('[Sell Auth] Transaction ID:', req.body.unique_id);
-
-    // Verify signature (optional but recommended)
-    const isValid = verifySignature(req);
-    if (!isValid) {
-        console.log('[Sell Auth] ❌ Invalid signature!');
-        // Still respond with 200 for testing, but log the error
-        // In production, you should return 401
-    }
+    console.log('[Sell Auth] Webhook received at:', new Date().toISOString());
+    console.log('[Sell Auth] Headers:', JSON.stringify(req.headers, null, 2));
+    console.log('[Sell Auth] Body:', JSON.stringify(req.body, null, 2));
 
     try {
-        // Check if the purchase is completed
-        if (req.body.event !== 'INVOICE.ITEM.DELIVER-DYNAMIC') {
-            console.log('[Sell Auth] ⚠️ Unknown event type:', req.body.event);
-            return res.status(200).send('Event not handled');
+        // Verify the webhook signature
+        const signature = req.headers['x-signature'];
+        const timestamp = req.headers['x-timestamp'];
+        
+        if (!signature) {
+            console.error('[Sell Auth] Missing signature header');
+            return res.status(401).json({ 
+                success: false, 
+                error: 'Missing signature' 
+            });
         }
 
-        if (req.body.status !== 'completed') {
-            console.log('[Sell Auth] ⚠️ Purchase not completed. Status:', req.body.status);
-            return res.status(200).send('Purchase not completed');
+        // Get the sale data
+        const saleData = req.body;
+        const event = saleData.event;
+        const status = saleData.status;
+
+        console.log(`[Sell Auth] Event: ${event}, Status: ${status}`);
+
+        // Check if it's a completed purchase
+        if (event === 'INVOICE.ITEM.DELIVER-DYNAMIC' && status === 'completed') {
+            console.log('[Sell Auth] ✅ Valid purchase detected!');
+            
+            // Log the customer details
+            console.log(`[Sell Auth] Customer: ${saleData.email}`);
+            console.log(`[Sell Auth] Product: ${saleData.item?.product?.name || 'Unknown'}`);
+            console.log(`[Sell Auth] Transaction: ${saleData.unique_id}`);
+            
+            // For free products (price 0.00), deliver immediately
+            if (parseFloat(saleData.price) === 0) {
+                console.log('[Sell Auth] Free product detected - delivering file');
+                
+                // Fetch the file from source
+                const fileResponse = await axios({
+                    method: 'get',
+                    url: SOURCE_FILE_URL,
+                    responseType: 'stream',
+                    timeout: 60000,
+                });
+
+                // Set headers for file download
+                res.setHeader('Content-Type', 'model/obj');
+                res.setHeader('Content-Disposition', 'attachment; filename="Radio-Telescope.obj"');
+                
+                if (fileResponse.headers['content-length']) {
+                    res.setHeader('Content-Length', fileResponse.headers['content-length']);
+                }
+
+                // Stream the file
+                fileResponse.data.pipe(res);
+
+                fileResponse.data.on('error', (err) => {
+                    console.error('[Sell Auth] Stream error:', err.message);
+                    if (!res.headersSent) {
+                        res.status(500).json({ 
+                            success: false, 
+                            error: 'Failed to stream file' 
+                        });
+                    }
+                });
+
+            } else {
+                // For paid products, generate a download token
+                const token = crypto.randomBytes(32).toString('hex');
+                const downloadUrl = `https://${req.get('host')}/api/download/${token}`;
+                
+                console.log(`[Sell Auth] Generated download token for paid product`);
+                
+                // Respond with the download URL
+                res.json({
+                    success: true,
+                    message: 'Purchase verified successfully',
+                    download_url: downloadUrl,
+                    expires_in: 3600
+                });
+            }
+        } else {
+            console.log(`[Sell Auth] ⚠️ Unhandled event: ${event} or status: ${status}`);
+            res.status(200).json({ 
+                success: true, 
+                message: 'Webhook received but not processed' 
+            });
         }
-
-        // Log the sale details
-        const productName = req.body.item?.product?.name || 'Unknown Product';
-        const customerEmail = req.body.email || 'Unknown Email';
-        const price = req.body.price || '0.00';
-        
-        console.log('[Sell Auth] ✅ Valid purchase detected!');
-        console.log(`[Sell Auth] 📦 Product: ${productName}`);
-        console.log(`[Sell Auth] 👤 Customer: ${customerEmail}`);
-        console.log(`[Sell Auth] 💰 Price: $${price}`);
-
-        // --- RESPOND WITH PLAIN TEXT DELIVERABLES ---
-        // Sell Auth expects plain text with deliverables separated by new lines
-        
-        // Option 1: Direct download URL (file hosted elsewhere)
-        const downloadUrl = 'https://voidlureds.vercel.app/Radio-Telescope.obj';
-        
-        // Option 2: You can also provide multiple deliverables
-        const deliverables = [
-            downloadUrl,
-            // Add more deliverables if needed, one per line
-            // 'https://example.com/readme.txt',
-            // 'https://example.com/instructions.pdf'
-        ];
-
-        // Send plain text response with deliverables
-        console.log('[Sell Auth] 📤 Sending deliverables:', deliverables);
-        res.status(200)
-           .set('Content-Type', 'text/plain')
-           .send(deliverables.join('\n'));
 
     } catch (error) {
-        console.error('[Sell Auth] ❌ Error:', error.message);
-        // Even on error, Sell Auth expects a 200 response
-        // You can send an error message as the deliverable
-        res.status(200)
-           .set('Content-Type', 'text/plain')
-           .send('Error processing your purchase. Please contact support.');
+        console.error('[Sell Auth] Error:', error.message);
+        
+        // Check if the source file exists
+        if (error.response?.status === 404) {
+            return res.status(404).json({ 
+                success: false, 
+                error: 'Source file not found at the specified URL' 
+            });
+        }
+
+        res.status(500).json({ 
+            success: false, 
+            error: 'Internal server error',
+            message: error.message 
+        });
     }
 });
 
-// --- GET endpoint for testing (browser) ---
+// --- GET endpoint (for browser downloads) ---
 app.get('/api/file', async (req, res) => {
-    console.log('[GET] File request from:', req.ip);
+    console.log('[GET] File request received from:', req.ip);
     
     try {
         const response = await axios({
@@ -140,44 +157,79 @@ app.get('/api/file', async (req, res) => {
     }
 });
 
-// --- Health check for Sell Auth ---
-app.get('/health', (req, res) => {
-    res.json({
-        status: 'online',
-        service: 'Sell Auth Dynamic Delivery API',
-        version: '1.0.0',
-        endpoints: {
-            webhook: 'POST /api/file',
-            download: 'GET /api/file'
+// --- Token-based download for paid products ---
+const validTokens = new Map();
+
+app.get('/api/download/:token', async (req, res) => {
+    const { token } = req.params;
+    
+    console.log(`[Token] Download attempt with token: ${token.substring(0, 10)}...`);
+    
+    const tokenData = validTokens.get(token);
+    
+    if (!tokenData) {
+        console.log('[Token] ❌ Invalid token');
+        return res.status(401).json({ 
+            success: false, 
+            error: 'Invalid token' 
+        });
+    }
+    
+    if (tokenData.expires < Date.now()) {
+        console.log('[Token] ❌ Token expired');
+        validTokens.delete(token);
+        return res.status(401).json({ 
+            success: false, 
+            error: 'Token expired' 
+        });
+    }
+    
+    console.log('[Token] ✅ Valid token, delivering file');
+    
+    // Remove used token (one-time use)
+    validTokens.delete(token);
+    
+    try {
+        const response = await axios({
+            method: 'get',
+            url: SOURCE_FILE_URL,
+            responseType: 'stream',
+            timeout: 60000,
+        });
+
+        res.setHeader('Content-Disposition', 'attachment; filename="Radio-Telescope.obj"');
+        res.setHeader('Content-Type', 'model/obj');
+        
+        if (response.headers['content-length']) {
+            res.setHeader('Content-Length', response.headers['content-length']);
         }
-    });
+
+        response.data.pipe(res);
+        
+    } catch (error) {
+        console.error('Error fetching file:', error.message);
+        res.status(500).json({ error: 'Failed to fetch file' });
+    }
 });
 
 // --- Root endpoint ---
 app.get('/', (req, res) => {
     res.json({
-        service: 'Sell Auth Dynamic Delivery API',
+        service: 'OBJ File Delivery API',
         version: '1.0.0',
         status: 'online',
-        instructions: {
-            webhook_url: 'https://your-render-url.onrender.com/api/file',
-            response_format: 'Plain text with deliverables separated by new lines',
-            example_response: 'https://voidlureds.vercel.app/Radio-Telescope.obj'
+        endpoints: {
+            'POST /api/file': 'Sell Auth webhook endpoint',
+            'GET /api/file': 'Direct file download',
+            'GET /api/download/:token': 'Token-based download'
         }
     });
 });
 
 // --- Start server ---
 app.listen(PORT, () => {
-    console.log('\n========================================');
-    console.log('🚀 Server running on port', PORT);
-    console.log('========================================');
-    console.log('📡 Sell Auth Webhook URL:');
-    console.log(`   POST https://your-render-url.onrender.com/api/file`);
-    console.log('\n📁 Direct Download URL:');
-    console.log(`   GET https://your-render-url.onrender.com/api/file`);
-    console.log('\n📋 Response Format:');
-    console.log('   Plain text with deliverables (one per line)');
-    console.log('   Example: https://voidlureds.vercel.app/Radio-Telescope.obj');
-    console.log('========================================\n');
+    console.log(`Server running on port ${PORT}`);
+    console.log(`✅ Sell Auth compatible API is ready!`);
+    console.log(`📥 Webhook URL: https://your-render-url.onrender.com/api/file`);
+    console.log(`📁 Direct download: https://your-render-url.onrender.com/api/file`);
 });
